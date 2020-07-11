@@ -389,24 +389,125 @@ public class Demo4 {
 - 堆内存较大,多核cpu
 - 尽可能让单次STW的时间最短（少食多餐）
   - 0.1 0.1 0.1 0.1 0.1 = 0.5
+
   - 虚拟机参数：
     - `-XX:+UseConcMarkSweepGC ~ -XX:+UseParNewGC ~ SerialOld`
-      - `concurrent`:并发，`MarkSweep`：标记清除
+      - `concurrent`:并发，`MarkSweep` ：标记清除，简称`CMS`：https://www.jianshu.com/p/86e358afdf17
       - 用户进程与垃圾回收进程并发执行，抢占资源。
       - `-XX:+UseConcMarkSweepGC ~ -XX:+UseParNewGC`：成对执行，一个老年代，一个新生代。若并发失败，则退化成串行`SerialOld`回收方式。
     - `-XX:ParallelGCThreads=n ~ -XX:ConcGCThreads=threads`
       - 并行线程数 ~ 并发线程数
       - 并发线程数建议设置成并行线程数n的1/4
     - `-XX:CMSInitiatingOccupancyFraction=percent`
+      - 执行CMS垃圾回收的内存占比(控制何时进行CMS垃圾回收)
+      - 例：`percent`=60%，老年代内存达到60%，执行CMS垃圾回收（剩余的40%，留给浮动垃圾，若`percent`=100%，则浮动垃圾空间不够）
     - `-XX:+CMSScavengeBeforeRemark`
+      - 前言：新生代会引用老年代对象，为了重新标记，期间会扫描整个堆，但是许多新生代本身是作为垃圾要回收的，因此标记了"垃圾"，做了无用功。
+      - 在CMS GC前启动一次新生代gc（`XX:+UseParNewGC`），目的在于减少old gen对ygc gen的引用，降低remark时的开销，一般CMS的GC耗时 80%都在remark阶段。
+    
   - ![垃圾回收-响应时间优先](img\垃圾回收-响应时间优先.jpg)
-    - 初始标记非常快，暂停时间短。
-    - 重新标记，因为第二个并发运行阶段可能造成对象内存改变，所以重新标记。期间会线程阻塞
-    - 只有初试标记和重新标记会造成其他线程阻塞，其余均并发执行。
+    > 初始标记非常快，暂停时间短。
+    >
+    > 重新标记，因为第二个并发运行阶段可能造成对象内存改变，所以重新标记。期间会线程阻塞。
+    >
+    > 只有初试标记和重新标记会造成其他线程阻塞，其余均并发执行。
+    >
+    > 第四个安全点：垃圾回收线程**执行并发清理**的过程中，其他用户线程处于运行状态，在次期间，产生的垃圾无法被回收，只能等到下一次垃圾回收时才可以进行回收，我们称这些垃圾为**浮动垃圾**。下一次的垃圾回收，需要内存空间不足，才可清除垃圾，期间浮动垃圾会存在没有空间存放的尴尬局面；因此浮动垃圾需要预留一块空间来存储。
+    >
+    > 缺点：CMS是标记清除算法，会产生内存碎片，当内存碎片太多时，会造成并发失败，并发失败则`XX:+UseParNewGC`会退化成`SerialOld`串行老年代回收，清理碎片，时间消耗多。
 
 
 
+#### 3.4.4 G1
 
+定义: Garbage First、Garbage One
 
+- 2004论文发布
+- 2009 JDK 6u14体验
+- 2012 JDK 7u4官方支持
+- 2017JDK9默认
 
+适用场景：
+
+- 同时注重吞吐量(Throughput) 和低延迟(Low latency) ，默认的暂停目标是200 ms
+
+- 超大堆内存,会将堆划分为多个大小相等的Region
+
+- 整体上是标记+整理算法,两个区域之间是复制算法
+
+相关JVM参数
+
+  `-XX: +UseG1GC`
+
+  `-XX:G1HeapRegionSize=size`
+
+  `-XX :MaxGCPauseMillis=time`
+
+##### （1）垃圾回收阶段
+
+<img src="img\g1回收阶段.jpg" alt="g1回收阶段" style="zoom: 67%;" />
+
+##### （2）Young Collection
+
+- 会 STW
+
+<img src="D:\docs\文档\个人笔记\Java\Java底层\JVM\img\g1伊甸园.jpg" alt="g1伊甸园" style="zoom:67%;" />
+
+<img src="img\g1幸存区.jpg" alt="g1幸存区" style="zoom:67%;" />
+
+<img src="img\g1老年代.jpg" alt="g1老年代" style="zoom:67%;" />
+
+##### （3）Young Collection + CM
+
+- 在Young GC时会进行GC Root的初始标记
+- 老年代占用堆空间比例达到阈值时，进行并发标记(不会STW)，由下面的JVM参数决定
+  -  `-Xx: InitiatingHeapOccupancyPercent=percent` (默认45%)
+
+<img src="img\g1_cm1.jpg" alt="g1_cm1" style="zoom:67%;" />
+
+##### （4）Mixed Collection
+
+会对E、S、O进行全面垃圾回收
+
+- 最终标记(Remark) 会 STW
+
+- 拷贝存活(Evacuation) 会 STW
+
+`-XX :MaxGCPauseMillis=ms`
+
+<img src="img\g1_mix1.jpg" alt="g1_mix1" style="zoom:67%;" />
+
+> 红色是垃圾多的部分，G1优先回收，以至使最大暂停时间尽量少
+
+##### （5）Full GC
+
+- SerialGC
+  - 新生代内存不足发生的垃圾收集- minor gc
+  - 老年代内存不足发生的垃圾收集- full gc
+- ParallelGC
+  - 新生代内存不足发生的垃圾收集- minor gc
+  - 老年代内存不足发生的垃圾收集- full gc
+- CMS
+  - 新生代内存不足发生的垃圾收集- minor gc
+  - 老年代内存不足
+    - 当并发失败时=> 退化成SerialGC，执行Full GC
+- G1
+  - 新生代内存不足发生的垃圾收集- minor gc 
+  - 老年代内存不足
+    - 当并发垃圾收集的速度 < 其他线程垃圾产生的速度 => 退化成SerialGC，执行Full GC
+
+##### （6） Young Collection跨代引用
+
+1. 新生代回收的跨代引用(老年代引用新生代)问题
+2. 新生代垃圾回收，首先找到根对象，根对象一部分存在老年代中，根对象进行可达性分析，找到存活对象，存活对象进行复制，到幸存区
+3. 若有一个cart引用了新生代对象，则标记为脏卡(`dirty cart`)
+4. 之后gc root遍历时只需遍历脏cart即可，不用遍历整个老年代，提高了效率
+
+![g1_2](img\g1_2.jpg)
+
+![g1_3](img\g1_3.jpg)
+
+- 卡表与`Remembered Set`（记录incoming reference，即外部对自身的引用，即脏卡）
+- 在引用变更时通过 `post-write barrier` + `dirty card queue`
+- `concurrent refinement threads`  更新 `Remembered Set`  
 
