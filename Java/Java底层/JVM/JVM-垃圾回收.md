@@ -418,7 +418,7 @@ public class Demo4 {
 
 
 
-#### 3.4.4 G1
+#### 3.4.4 G1 **
 
 定义: Garbage First、Garbage One
 
@@ -430,10 +430,12 @@ public class Demo4 {
 适用场景：
 
 - 同时注重吞吐量(Throughput) 和低延迟(Low latency) ，默认的暂停目标是200 ms
-
 - 超大堆内存,会将堆划分为多个大小相等的Region
-
 - 整体上是标记+整理算法,两个区域之间是复制算法
+
+相关帖子：
+
+https://www.jianshu.com/p/548c67aa1bc0
 
 相关JVM参数
 
@@ -511,3 +513,107 @@ public class Demo4 {
 - 在引用变更时通过 `post-write barrier` + `dirty card queue`
 - `concurrent refinement threads`  更新 `Remembered Set`  
 
+##### （7）Remark
+
+- 定义：重新标记阶段
+
+- 参数：`pre-write barrier+ satb_mark_queue`
+
+
+
+
+SATB的全称（Snapshot At The Beginning）字面意思是开始GC前存活对象的一个快照。SATB的作用是保证在并发标记阶段的正确性。如何理解这句话？
+
+首先要介绍三色标记算法
+
+图为并发标记阶段，对象的处理状态图，黑色处理完，灰色处理中，白色未处理，最终白色的没有箭头指向的（没有强引用）则不会存活
+
+![g1_remark1](img\g1_remark1.webp)
+
+  在GC扫描C之前的颜色如下：
+
+![g1_remark2](img\g1_remark2.webp)
+
+假设在并发标记阶段，应用线程改变了这种引用关系
+
+```java
+A.c=C
+B.c=null
+```
+
+得到如下结果
+
+![g1_remark3](img\g1_remark3.webp)
+
+在重新标记阶段扫描后
+
+![g1_remark4](img\g1_remark4.webp)
+
+​		这种情况下C会被当做垃圾进行回收。Snapshot的存活对象原来是A、B、C，现在变成A、B了，Snapshot的完整遭到破坏了，显然这个做法是不合理。
+
+​		 G1采用的是`pre-write barrier`（写屏障）解决这个问题。简单说就是在并发标记阶段，当引用关系发生变化的时候，通过`pre-write barrier`函数会把这种这种变化记录并保存在一个队列里，在JVM源码中这个队列叫`satb_mark_queue`。在remark阶段会扫描这个队列，通过这种方式，旧的引用所指向的对象就会被标记上，其子孙也会被递归标记上，这样就不会漏标记任何对象，snapshot的完整性也就得到了保证。
+
+![g1_remark5](img\g1_remark5.png)
+
+> -------剩余详细解释见如上G1帖子第一个
+
+##### （8）JDK 8u20字符串去重
+
+- 优点：节省大量内存
+- 缺点：略微多占用了 cpu 时间，新生代回收时间略微增加
+- 参数：`-XX:+UseStringDeduplication`  】
+  - Deduplication，去除重复
+
+```java
+String s1 = new String("hello"); // char[]{'h','e','l','l','o'}
+String s2 = new String("hello"); // char[]{'h','e','l','l','o'}
+```
+
+- 将所有新分配的字符串放入一个队列
+- 当新生代回收时，G1并发检查是否有字符串重复
+- 如果它们值一样，让它们引用同一个 char[]
+  - 如上s1、s2会引用同一个char数组
+- 注意，与 `String.intern()` 不一样
+  - `String.intern()` 关注的是字符串对象
+  - 而G1的字符串去重关注的是 `char[]`
+  - 在 JVM 内部，使用了不同的字符串表  
+
+##### （9）JDK 8u40 并发标记类卸载
+
+​		所有对象都经过并发标记后，就能知道哪些类不再被使用，当一个类加载器的所有类都不再使用，则卸
+载它所加载的所有类 `-XX:+ClassUnloadingWithConcurrentMark`默认启用  
+
+##### （10）JDK 8u60 回收巨型对象
+
+​		定义：类比`Eden、survivor、old`区域，一个对象大于 `region` 的一半时，称之为巨型对象
+
+![g1_hugeObj](img\g1_hugeObj.jpg)
+
+- G1 不会对巨型对象进行拷贝
+- 回收时被优先考虑
+- G1 会跟踪老年代所有 incoming 引用，这样老年代 incoming 引用为0 的巨型对象就可以在新生
+  代垃圾回收时处理掉  
+  - 如上图：若老年代`cart`没有对巨型对象进行引用，则巨型对象会在新生代就会被回收。
+
+##### （11）JDK 9 并发标记起始时间的调整
+
+- 并发标记必须在堆空间占满前完成，否则退化为 FullGC
+- JDK 9 之前需要使用 `-XX:InitiatingHeapOccupancyPercent`
+- JDK 9 可以动态调整
+  - `-XX:InitiatingHeapOccupancyPercent` 用来设置初始值
+  - 进行数据采样并动态调整
+  - 总会添加一个安全的空档空间  
+
+##### （12）JDK 9 更高效的回收
+
+- 250+增强
+- 180+bug修复
+- https://docs.oracle.com/en/java/javase/12/gctuning  
+
+### 3.5 垃圾回收调优
+
+#### 预备知识
+
+- 掌握 GC 相关的 VM 参数，会基本的空间调整
+- 掌握相关工具
+- 明白一点：调优跟应用、环境有关，没有放之四海而皆准的法则  
