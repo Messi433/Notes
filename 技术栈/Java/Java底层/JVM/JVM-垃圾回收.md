@@ -612,8 +612,137 @@ String s2 = new String("hello"); // char[]{'h','e','l','l','o'}
 
 ### 3.5 垃圾回收调优
 
-#### 预备知识
+#### 3.5.1 预备知识
 
 - 掌握 GC 相关的 VM 参数，会基本的空间调整
+
+> 查看虚拟机运行参数
+> "C: Program Files \Javaljdk1.8.0_91\bin\java" -XX:+PrintFlagsFinaI -version | findstr "GC"
+
 - 掌握相关工具
 - 明白一点：调优跟应用、环境有关，没有放之四海而皆准的法则  
+
+#### 3.5.2 调优领域
+
+- 内存
+- 锁竞争
+- cpu 占用
+- io  
+
+#### 3.5.3 确定调优目标
+
+- 【低延迟】还是【高吞吐量】，选择合适的回收器
+  - 低延迟：快速响应，适用互联网项目。
+  - 高吞吐量：适用科学计算。
+- CMS，G1，ZGC
+  - 低延迟
+  - CMS（JDK9已不推荐，JDK14完全移除，取而代之是G1）
+  - ZGC（非常低延迟，体验级，JDK12引入）
+- ParallelGC
+- Zing
+  - 超低的STW
+
+#### 3.5.4 最快的 GC
+
+答案是不发生 GC
+
+- 查看 `Full GC` 前后的内存占用，考虑下面几个问题
+  - 数据是不是太多？
+    - `resultSet = statement.executeQuery("select * from 大表 limit n")`
+  - 数据表示是否太臃肿？
+    - 对象图
+    - 对象大小 16，Integer 24（对象16，包装int 4，对齐4）所以能用 int 就用int
+  - 是否存在内存泄漏？
+    - `static Map map =`
+    - 软
+    - 弱
+    - 第三方缓存实现（redis等）
+
+#### 3.5.5 新生代调优
+
+在排除了程序不合理造成的性能瓶颈之后，接下来就是内存调优，内存调优先从新生代开始
+
+- 新生代的特点
+
+  - 所有的 new 操作的内存分配非常廉价
+
+    - `TLAB` `thread-local allocation buffer`（线程局部分配缓冲区）
+
+      > 多个线程进行内存分配时，为了防止多个线程内存占用，所以就出现了TLAB，每个线程私有化的访问自身分配的内存
+
+  - 死亡对象的回收代价是零
+
+  - 大部分对象用过即死
+
+  - Minor GC 的时间远远低于 Full GC  
+
+- 越大越好吗？
+
+  > -Xmn Sets the **initial and maximum size (in bytes)** of the heap for the young generation (nursery).GC is performed in this region more often than in other regions. If the size for the young
+  > generation is **too small, then a lot of minor garbage** collections are performed. If the size is **too**
+  > **large, then only full garbage collections are performed**, which can take a long time to complete.Oracle recommends that you keep the size for the young generation greater **than 25% and less than 50%** of the overall heap size.
+
+  - 综上文档所述，新生代尽可能大，但不能太大，一般在25%-50%
+  - 新生代主要是复制算法，复制涉及内存的移动，所以耗费较长
+
+- 合理的young内存分配：新生代能容纳所有【并发量 * (请求-响应)】的数据
+
+  - 一次请求就可以把大部分对象都回收，使得很少触发young gc
+
+- 合理的幸存区分配：大到能保留【当前活跃对象+需要晋升对象】
+
+  -  幸存区可分为，将要被回收的对象、即将晋升但是年龄(阈值)不够，两者都因为被使用中所以还没被回收
+
+    
+
+- 晋升阈值配置得当，让长时间存活对象尽快晋升 
+
+  - `-XX:MaxTenuringThreshold=threshold`
+
+  - `-XX:+PrintTenuringDistribution`  
+
+  - ```java
+    Desired survivor size 48286924 bytes, new threshold 10 (max 10)
+    - age 1: 28992024 bytes, 28992024 total
+    - age 2: 1366864 bytes, 30358888 total
+    - age 3: 1425912 bytes, 31784800 total
+    ...
+    ```
+
+#### 3.5.6 老年代调优
+
+以 CMS 为例
+
+- CMS 的老年代内存越大越好
+
+- 先尝试不做调优，如果没有 Full GC 那么已经...，否则先尝试调优新生代
+
+- 观察发生 Full GC 时老年代内存占用，将老年代内存预设调大 1/4 ~ 1/3
+
+  - `-XX:CMSInitiatingOccupancyFraction=percent`  
+
+    > percent是指的留下1-percent给浮动垃圾
+
+#### 3.5.7 调优案例
+
+##### 案例1：Full GC 和 Minor GC频繁  
+
+- 现象：程序运行期间，程序GC频繁，尤其是Minor GC达到了100/min
+
+- 原因：GC频繁，空间紧张，因为幸存区空间紧张，其对象晋升阈值降低，导致本来生存周期很短的对象晋升到老年代
+- 解决：调整新生代空间大小
+
+##### 案例2 ：请求高峰期发生 Full GC，单次暂停时间特别长 （CMS）  
+
+- 原因
+  - 业务需求追求低延时，所以用CMS
+  - 重新标记（见3.4.3）需要扫描整个堆内存的对象，高峰期的新生代对象多，可能造成STW时间长
+- 解决
+  - 重新标记前先做一次垃圾回收，回收新生代对象，减少重新标记的时间（见3.4.3第四个参数）
+
+##### 案例3 ：老年代充裕情况下，发生 Full GC （CMS  jdk1.7）
+
+- 原因
+  - 1.8+是元空间作为方法区的实现；1.7及之前是永久代，永久代空间不足也会导致Full GC；
+  - 1.8+元空间，其垃圾回收就不是Java组件所控制的了，元空间默认使用操作系统使用的内存空间，较为充裕
+- 解决：1.7-需要增加永久代的内存空间，1.8+不会出现这个问题。
