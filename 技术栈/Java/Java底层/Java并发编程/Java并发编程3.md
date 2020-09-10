@@ -478,3 +478,217 @@ public class ConcurrencyTest {
 ```
 
 #### 5.3.2 原理之 volatile  
+
+volatile 的底层实现原理是内存屏障，Memory Barrier（Memory Fence）
+
+- 对 volatile 变量的写指令后会加入写屏障
+- 对 volatile 变量的读指令前会加入读屏障  
+
+##### （1）如何保证可见性  
+
+- 写屏障（sfence）保证在该屏障之前的，对共享变量的改动，都同步到主存当中  
+
+```java
+public void actor2(I_Result r) {
+    num = 2;
+    ready = true; // ready 是 volatile 赋值带写屏障（ready及之前都被写屏障了）
+    // 写屏障
+}
+```
+
+- 而读屏障（lfence）保证在该屏障之后，对共享变量的读取，加载的是主存中最新数据  
+
+```java
+public void actor1(I_Result r) {
+    // 读屏障
+    // ready 是 volatile 读取值带读屏障
+    if(ready) {
+        r.r1 = num + num;
+    } else {
+        r.r1 = 1;
+    }
+}
+```
+
+![volatile原理](img\volatile原理.jpg)
+
+##### （2）如何保证有序性  
+
+写屏障会确保指令重排序时，不会将写屏障之前的代码排在写屏障之后  
+
+```java
+public void actor2(I_Result r) {
+    num = 2;
+    ready = true; // ready 是 volatile 赋值带写屏障
+    // 写屏障
+}
+```
+
+读屏障会确保指令重排序时，不会将读屏障之后的代码排在读屏障之前  
+
+```java
+public void actor1(I_Result r) {
+    // 读屏障
+    // ready 是 volatile 读取值带读屏障
+    if(ready) {
+        r.r1 = num + num;
+    } else {
+        r.r1 = 1;
+    }
+}
+```
+
+<img src="img\volatile原理2.jpg" alt="volatile原理2" style="zoom:67%;" />
+
+还是那句话，不能解决指令交错：
+
+- 写屏障仅仅是保证之后的读能够读到最新的结果，但不能保证读跑到它前面去
+- 而有序性的保证也只是保证了本线程内相关代码不被重排序  
+
+<img src="img\volatile原理3.jpg" alt="volatile原理3" style="zoom:67%;" />
+
+##### （3）double-checked locking 问题  
+
+以著名的 double-checked locking 单例模式为例  
+
+```java
+public final class Singleton {
+    private Singleton() { }
+    private static volatile Singleton INSTANCE = null;
+    public static Singleton getInstance() {
+        // 实例没创建，才会进入内部的 synchronized代码块
+        if (INSTANCE == null) {//INSTANCE没有完全交给syn代码块管理
+            synchronized (Singleton.class) { // t2
+                // 也许有其它线程已经创建实例，所以再判断一次
+                if (INSTANCE == null) { // t1
+                    INSTANCE = new Singleton();
+                }
+            }
+        }
+        return INSTANCE;
+    }
+}
+```
+
+以上的实现特点是  
+
+- 懒惰实例化
+- 首次使用 getInstance() 才使用 synchronized 加锁，后续使用时无需加锁
+- 有隐含的，但很关键的一点：第一个 if 使用了 INSTANCE 变量，是在同步块之外  
+
+但在多线程环境下，上面的代码是有问题的，`getInstance` 方法对应的字节码为：  
+
+```properties
+0: getstatic #2 // Field INSTANCE:Lcn/itcast/n5/Singleton;
+3: ifnonnull 37
+6: ldc       #3 // class cn/itcast/n5/Singleton
+8: dup
+9: astore_0
+10: monitorenter
+11: getstatic #2 // Field INSTANCE:Lcn/itcast/n5/Singleton;
+14: ifnonnull 27
+17: new       #3 // class cn/itcast/n5/Singleton
+20: dup
+21: invokespecial #4 // Method "<init>":()V
+24: putstatic     #2 // Field INSTANCE:Lcn/itcast/n5/Singleton;
+27: aload_0
+28: monitorexit
+29: goto 37
+32: astore_1
+33: aload_0
+34: monitorexit
+35: aload_1
+36: athrow
+37: getstatic      #2 // Field INSTANCE:Lcn/itcast/n5/Singleton;
+40: areturn
+```
+
+其中
+
+- 17 表示创建对象，将对象引用入栈 // new Singleton
+
+- 20 表示复制一份对象引用 // 引用地址
+
+- 21 表示利用一个对象引用，调用构造方法
+
+- 24 表示利用一个对象引用，赋值给 static INSTANCE
+
+也许 jvm 会优化为：先执行 24，再执行 21。如果两个线程 t1，t2 按如下时间序列执行：  
+
+![volatile原理4](img\volatile原理4.jpg)
+
+关键在于 0: getstatic 这行代码在 monitor 控制之外，它就像之前举例中不守规则的人，可以越过 monitor 读取
+INSTANCE 变量的值
+
+这时 t1 还未完全将构造方法执行完毕，如果在构造方法中要执行很多初始化操作，那么 t2 拿到的是将是一个未初
+始化完毕的单例
+
+对 INSTANCE 使用 volatile 修饰即可，可以禁用指令重排，但要注意在 JDK 5 以上的版本的 volatile 才会真正有效
+
+> synchronized关键字可以保证 原子性、可见性、**有序性**，但是前提是共享变量都交给synchronized去管理，不能如上例子将共享变量留在外部，synchronized保证有序性是通过monitor锁机制，而**不是禁用指令重排**
+
+##### （4）double-checked locking 解决  
+
+```java
+public final class Singleton {
+    private Singleton() { }
+    private static volatile Singleton INSTANCE = null;
+    public static Singleton getInstance() {
+        // 实例没创建，才会进入内部的 synchronized代码块
+        if (INSTANCE == null) {
+            synchronized (Singleton.class) { // t2
+                // 也许有其它线程已经创建实例，所以再判断一次
+                if (INSTANCE == null) { // t1
+                    INSTANCE = new Singleton();
+                }
+            }
+        }
+        return INSTANCE;
+    }
+}
+```
+
+字节码上看不出来 volatile 指令的效果  
+
+```properties
+// -------------------------------------> 加入对 INSTANCE 变量的读屏障
+0: getstatic              #2           // Field INSTANCE:Lcn/itcast/n5/Singleton;
+3: ifnonnull              37
+6: ldc                    #3           // class cn/itcast/n5/Singleton
+8: dup								   //复制了指针引用放入栈中
+9: astore_0
+10: monitorenter -----------------------> 保证原子性、可见性
+11: getstatic             #2          // Field INSTANCE:Lcn/itcast/n5/Singleton;
+14: ifnonnull 27
+17: new                   #3          // class cn/itcast/n5/Singleton
+20: dup
+21: invokespecial         #4          // Method "<init>":()V
+24: putstatic             #2          // Field INSTANCE:Lcn/itcast/n5/Singleton;
+// -------------------------------------> 加入对 INSTANCE 变量的写屏障
+27: aload_0
+28: monitorexit ------------------------> 保证原子性、可见性
+29: goto 37
+32: astore_1
+33: aload_0
+34: monitorexit
+35: aload_1
+36: athrow
+37: getstatic             #2           // Field INSTANCE:Lcn/itcast/n5/Singleton;
+40: areturn
+```
+
+如上面的注释内容所示，读写 volatile 变量时会加入内存屏障（Memory Barrier（Memory Fence）），保证下面两点：
+
+- 可见性
+  - 写屏障（sfence）保证在该屏障之前的 t1 对共享变量的改动，都同步到主存当中
+  - 而读屏障（lfence）保证在该屏障之后 t2 对共享变量的读取，加载的是主存中最新数据
+- 有序性
+  - 写屏障会确保指令重排序时，不会将写屏障之前的代码排在写屏障之后
+  - 读屏障会确保指令重排序时，不会将读屏障之后的代码排在读屏障之前
+- 更底层是读写变量时使用 lock 指令来多核 CPU 之间的可见性与有序性  
+
+![volatile原理4](img\volatile原理5.jpg)
+
+#### 5.3.3 happens-before  
+
+happens-before 规定了对共享变量的写操作对其它线程的读操作可见，它是可见性与有序性的一套规则总结，抛开以下 happens-before 规则，JMM 并不能保证一个线程对共享变量的写，对于其它线程对该共享变量的读可见  
