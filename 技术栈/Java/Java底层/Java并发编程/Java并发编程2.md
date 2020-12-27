@@ -1106,7 +1106,19 @@ synchronized(lock) {
 }
 ```
 
-# 97-113略
+#### 同步模式之保护性暂停<font color="#0099ff">设计模式</font>(97-104)
+
+- t1 等待 t2 线程的结果
+
+##### join<font color="#0099ff">原理</font>（保护性暂停）
+
+- t1 等待 t2 线程的结束
+
+##### 保护性暂停<font color="#0099ff">模式</font>扩展
+
+- 见模式篇案例
+
+#### 异步模式之生产者/消费者<font color="#0099ff">设计模式</font>(105-107)
 
 ### 4.8 `Park` & `Unpark`  
 
@@ -1481,6 +1493,8 @@ public class TestLiveLock {
 
 ### 4.12 ReentrantLock（可重入锁）  
 
+> 可以结合原理篇，看reentrantLock以及writeLock源码
+
 - 相对于 synchronized 它具备如下特点
   - 可中断
   - 可以设置超时时间
@@ -1845,8 +1859,6 @@ t481 running...
 
 > 公平锁一般没有必要，会**降低并发度**，后面分析原理时会讲解  
 
-# 126-132略，看完97-113，wait notify再看
-
 #### 4.12.5 条件变量  
 
 synchronized 中也有条件变量，就是我们讲原理时那个 waitSet 休息室，当条件不满足时进入 waitSet 等待
@@ -1863,7 +1875,89 @@ ReentrantLock 的条件变量比 synchronized 强大之处在于，它是支持�
 - await 的线程被唤醒（或打断、或超时）取重新竞争 lock 锁
 - 竞争 lock 锁成功后，从 await 后继续执行  
 
-#### 4.12.6 同步模式之顺序控制  
+示例:
+
+> 基于synchronized 送烟例子改造
+
+```java
+static ReentrantLock lock = new ReentrantLock();
+static Condition waitCigaretteQueue = lock.newCondition();
+static Condition waitbreakfastQueue = lock.newCondition();
+static volatile boolean hasCigrette = false;
+static volatile boolean hasBreakfast = false;
+public static void main(String[] args) {
+  new Thread(() -> {
+    try {
+      lock.lock();
+      while (!hasCigrette) {
+        try {
+          waitCigaretteQueue.await();
+        } catch (InterruptedException e) {
+          e.printStackTrace();
+        }
+      }
+      log.debug("等到了它的烟");
+    } finally {
+      lock.unlock();
+    }
+  }).start();
+  new Thread(() -> {
+    try {
+      lock.lock();
+      while (!hasBreakfast) {
+        try {
+          waitbreakfastQueue.await();
+        } catch (InterruptedException e) {
+          e.printStackTrace();
+        }
+      }
+      log.debug("等到了它的早餐");
+    } finally {
+      lock.unlock();
+    }
+  }).start();
+  sleep(1);
+  sendBreakfast();
+  sleep(1);
+  sendCigarette();
+}
+private static void sendCigarette() {
+  lock.lock();
+  try {
+    log.debug("送烟来了");
+    hasCigrette = true;
+    waitCigaretteQueue.signal();
+  } finally {
+    lock.unlock();
+  }
+}
+private static void sendBreakfast() {
+  lock.lock();
+  try {
+    log.debug("送早餐来了");
+    hasBreakfast = true;
+    waitbreakfastQueue.signal();
+  } finally {
+    lock.unlock();
+  }
+}
+```
+
+输出
+
+```
+18:52:27.680 [main] c.TestCondition - 送早餐来了
+18:52:27.682 [Thread-1] c.TestCondition - 等到了它的早餐
+18:52:28.683 [main] c.TestCondition - 送烟来了
+18:52:28.683 [Thread-0] c.TestCondition - 等到了它的烟
+```
+
+#### 4.12.6 同步<font color="#0099ff">模式</font>之顺序控制  
+
+- 方法1：wait——notify
+- 方法2：await——signal
+- 方法3：park——unpark
+- 经典的并发面试题：https://www.bilibili.com/video/BV16J411h7Rd?p=130
 
 ### 本章小结
 
